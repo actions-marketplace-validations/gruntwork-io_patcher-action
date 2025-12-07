@@ -1,0 +1,91 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: yarn
+      - name: Run tests
+        run: yarn lint
+
+  check-dist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        run: yarn
+      - name: Rebuild the dist/ directory
+        run: yarn build
+      - name: Compare the expected and actual dist/ directories
+        run: |
+          if [ "$(git diff --ignore-space-at-eol dist/ | wc -l)" -gt "0" ]; then
+            echo "Detected uncommitted changes after build.  See status below:"
+            git diff
+            exit 1
+          fi
+
+  patcher-report-dev:
+    runs-on: ubuntu-latest
+    outputs:
+      spec: ${{ steps.run-report.outputs.spec }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patcher
+        id: run-report
+        uses: ./
+        with:
+          github_token: ${{ secrets.PATCHER_FULL_REPO }}
+          patcher_command: report
+          patcher_version: v0.15.2
+          working_dir: infrastructure-live
+          spec_file: spec.json
+          include_dirs: "{*dev*}/**"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: spec-file
+          path: spec.json
+
+  patcher-update-dev:
+    # Runs patcher update against each dependency for the specified accounts in dry run mode.
+    needs: [patcher-report-dev]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJson(needs.patcher-report-dev.outputs.spec).Dependencies }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Load spec file
+        uses: actions/download-artifact@v4
+        with:
+          name: spec-file
+      - name: Patcher
+        id: run-update
+        uses: ./
+        with:
+          github_token: ${{ secrets.PATCHER_FULL_REPO }}
+          patcher_command: update
+          patcher_version: v0.15.2
+          working_dir: infrastructure-live
+          spec_file: spec.json
+          pull_request_title: "[Patcher] [dev] Update ${{ matrix.ID }}"
+          pull_request_branch: "patcher-dev-updates-${{ matrix.ID }}"
+          dependency: ${{ matrix.ID }}
+          dry_run: true
